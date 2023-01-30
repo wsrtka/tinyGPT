@@ -23,11 +23,14 @@ class TinyGPT(nn.Module):
     def __init__(self, vocab_size, n_embed=32):
         super().__init__()
         self.token_embedding_table = nn.Embedding(vocab_size, n_embed)
+        # language model head
+        self.lm_head = nn.Linear(n_embed, vocab_size)
 
     def forward(self, idx, targets=None):
         """Forward pass of network."""
         # returns (Batch, Time, Channels)
-        logits = self.token_embedding_table(idx)
+        token_embeddings = self.token_embedding_table(idx)
+        logits = self.lm_head(token_embeddings)
 
         if targets is None:
             loss = None
