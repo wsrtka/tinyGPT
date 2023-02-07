@@ -10,7 +10,7 @@ from torch.nn import functional as F
 BATCH_SIZE = 32
 # maximum context length for predictions
 BLOCK_SIZE = 8
-MAX_ITERS = 10000
+MAX_ITERS = 5000
 EVAL_INTERVAL = 500
 LEARNING_RATE = 1e-3
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -56,6 +56,18 @@ class MultiHeadAttention(nn.Module):
         return torch.cat([h(x) for h in self.heads], dim=-1)
 
 
+class FeedForward(nn.Module):
+    """A single linear layer followed by an activation function."""
+
+    def __init__(self, n_embed):
+        super().__init__()
+        self.net = nn.Sequential(nn.Linear(n_embed, n_embed), nn.ReLU())
+
+    def forward(self, x):
+        """Forward pass in feedforward layer."""
+        return self.net(x)
+
+
 class TinyGPT(nn.Module):
     """Simple model that returns probability of P(c_t|c_t-1)."""
 
@@ -67,6 +79,8 @@ class TinyGPT(nn.Module):
         self.lm_head = nn.Linear(n_embed, vocab_size)
         # self-attention head
         self.sa_heads = MultiHeadAttention(4, n_embed // 4)
+        # feedforward layer
+        self.ffwd = FeedForward(n_embed)
 
     def forward(self, idx, targets=None):
         """Forward pass of network."""
@@ -78,7 +92,10 @@ class TinyGPT(nn.Module):
             torch.arange(time, device=DEVICE)
         )
         x = token_embeddings + position_embeddings
+        # gather information on tokens
         x = self.sa_heads(x)
+        # let tokens analyse the information
+        x = self.ffwd(x)
         logits = self.lm_head(x)
 
         if targets is None:
