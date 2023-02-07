@@ -10,11 +10,37 @@ from torch.nn import functional as F
 BATCH_SIZE = 32
 # maximum context length for predictions
 BLOCK_SIZE = 8
-MAX_ITERS = 3000
-EVAL_INTERVAL = 200
-LEARNING_RATE = 1e-2
+MAX_ITERS = 10000
+EVAL_INTERVAL = 500
+LEARNING_RATE = 1e-3
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 EVAL_ITERS = 200
+
+
+# pylint: disable=too-few-public-methods
+class Head(nn.Module):
+    """Self-attention head."""
+
+    def __init__(self, head_size, n_embed=32):
+        super().__init__()
+        self.key = nn.Linear(n_embed, head_size, bias=False)
+        self.query = nn.Linear(n_embed, head_size, bias=False)
+        self.value = nn.Linear(n_embed, head_size, bias=False)
+        self.register_buffer("tril", torch.tril(torch.ones(BLOCK_SIZE, BLOCK_SIZE)))
+
+    def forward(self, x):
+        """Forward pass for self-attention head."""
+        _, time_dim, channels = x.shape
+        k = self.key(x)
+        q = self.query(x)
+        # compute attention scores (affinities)
+        wei = q @ k.transpose(-2, -1) * channels**-0.5
+        wei = wei.masked_fill(self.tril[:time_dim, :time_dim] == 0, float("-inf"))
+        wei = F.softmax(wei, dim=-1)
+        # weighted aggregation of values
+        v = self.value(x)
+        out = wei @ v
+        return out
 
 
 class TinyGPT(nn.Module):
@@ -26,6 +52,8 @@ class TinyGPT(nn.Module):
         self.position_embedding_table = nn.Embedding(BLOCK_SIZE, n_embed)
         # language model head
         self.lm_head = nn.Linear(n_embed, vocab_size)
+        # self-attention head
+        self.sa_head = Head(n_embed)
 
     def forward(self, idx, targets=None):
         """Forward pass of network."""
@@ -37,6 +65,7 @@ class TinyGPT(nn.Module):
             torch.arange(time, device=DEVICE)
         )
         x = token_embeddings + position_embeddings
+        x = self.sa_head(x)
         logits = self.lm_head(x)
 
         if targets is None:
@@ -52,7 +81,9 @@ class TinyGPT(nn.Module):
     def generate(self, idx, max_new_tokens):
         """Generate new tokens."""
         for _ in range(max_new_tokens):
-            logits, _ = self(idx)
+            # crop context to prevent embedding overflow
+            idx_cond = idx[:, -BLOCK_SIZE:]
+            logits, _ = self(idx_cond)
             # get predictions only for last character (latest time)
             logits = logits[:, -1, :]
             # convert to probabilities
