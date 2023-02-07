@@ -43,6 +43,19 @@ class Head(nn.Module):
         return out
 
 
+class MultiHeadAttention(nn.Module):
+    """Multi-headed attention module."""
+
+    def __init__(self, num_heads, head_size):
+        super().__init__()
+        self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+
+    def forward(self, x):
+        """Forward pass for multi-headed attention."""
+        # concatenate outputs by channel dimension
+        return torch.cat([h(x) for h in self.heads], dim=-1)
+
+
 class TinyGPT(nn.Module):
     """Simple model that returns probability of P(c_t|c_t-1)."""
 
@@ -53,7 +66,7 @@ class TinyGPT(nn.Module):
         # language model head
         self.lm_head = nn.Linear(n_embed, vocab_size)
         # self-attention head
-        self.sa_head = Head(n_embed)
+        self.sa_heads = MultiHeadAttention(4, n_embed // 4)
 
     def forward(self, idx, targets=None):
         """Forward pass of network."""
@@ -65,7 +78,7 @@ class TinyGPT(nn.Module):
             torch.arange(time, device=DEVICE)
         )
         x = token_embeddings + position_embeddings
-        x = self.sa_head(x)
+        x = self.sa_heads(x)
         logits = self.lm_head(x)
 
         if targets is None:
