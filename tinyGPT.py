@@ -46,14 +46,17 @@ class Head(nn.Module):
 class MultiHeadAttention(nn.Module):
     """Multi-headed attention module."""
 
-    def __init__(self, num_heads, head_size):
+    def __init__(self, num_heads, head_size, n_embed=32):
         super().__init__()
         self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+        self.proj = nn.Linear(n_embed, n_embed)
 
     def forward(self, x):
         """Forward pass for multi-headed attention."""
         # concatenate outputs by channel dimension
-        return torch.cat([h(x) for h in self.heads], dim=-1)
+        out = torch.cat([h(x) for h in self.heads], dim=-1)
+        out = self.proj(out)
+        return out
 
 
 class FeedForward(nn.Module):
@@ -61,7 +64,9 @@ class FeedForward(nn.Module):
 
     def __init__(self, n_embed):
         super().__init__()
-        self.net = nn.Sequential(nn.Linear(n_embed, n_embed), nn.ReLU())
+        self.net = nn.Sequential(
+            nn.Linear(n_embed, n_embed), nn.ReLU(), nn.Linear(n_embed, n_embed)
+        )
 
     def forward(self, x):
         """Forward pass in feedforward layer."""
@@ -80,9 +85,9 @@ class Block(nn.Module):
     def forward(self, x):
         """Forward pass for transformer block."""
         # communication
-        x = self.sa(x)
+        x += self.sa(x)
         # computation
-        x = self.ffwd(x)
+        x += self.ffwd(x)
         return x
 
 
