@@ -65,7 +65,7 @@ class FeedForward(nn.Module):
     def __init__(self, n_embed):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(n_embed, n_embed), nn.ReLU(), nn.Linear(n_embed, n_embed)
+            nn.Linear(n_embed, 4 * n_embed), nn.ReLU(), nn.Linear(4 * n_embed, n_embed)
         )
 
     def forward(self, x):
@@ -81,13 +81,16 @@ class Block(nn.Module):
         head_size = n_embed // num_heads
         self.sa = MultiHeadAttention(num_heads, head_size)
         self.ffwd = FeedForward(n_embed)
+        # layer normalization
+        self.ln1 = nn.LayerNorm(n_embed)
+        self.ln2 = nn.LayerNorm(n_embed)
 
     def forward(self, x):
         """Forward pass for transformer block."""
         # communication
-        x += self.sa(x)
+        x = x + self.sa(self.ln1(x))
         # computation
-        x += self.ffwd(x)
+        x = x + self.ffwd(self.ln2(x))
         return x
 
 
