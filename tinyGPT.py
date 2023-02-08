@@ -9,23 +9,26 @@ from torch.nn import functional as F
 # independent sequences processed in parallel
 BATCH_SIZE = 32
 # maximum context length for predictions
-BLOCK_SIZE = 8
+BLOCK_SIZE = 128
 MAX_ITERS = 5000
 EVAL_INTERVAL = 500
-LEARNING_RATE = 1e-3
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+LEARNING_RATE = 5e-4
+DEVICE = "mps" if torch.backends.mps.is_available() else "cpu"
 EVAL_ITERS = 200
-
+DROPOUT_RATE = 0.5
+N_EMBED = 192
+N_HEADS = 6
 
 # pylint: disable=too-few-public-methods
 class Head(nn.Module):
     """Self-attention head."""
 
-    def __init__(self, head_size, n_embed=32):
+    def __init__(self, head_size, n_embed=N_EMBED):
         super().__init__()
         self.key = nn.Linear(n_embed, head_size, bias=False)
         self.query = nn.Linear(n_embed, head_size, bias=False)
         self.value = nn.Linear(n_embed, head_size, bias=False)
+        self.dropout = nn.Dropout(DROPOUT_RATE)
         self.register_buffer("tril", torch.tril(torch.ones(BLOCK_SIZE, BLOCK_SIZE)))
 
     def forward(self, x):
@@ -37,6 +40,7 @@ class Head(nn.Module):
         wei = q @ k.transpose(-2, -1) * channels**-0.5
         wei = wei.masked_fill(self.tril[:time_dim, :time_dim] == 0, float("-inf"))
         wei = F.softmax(wei, dim=-1)
+        wei = self.dropout(wei)
         # weighted aggregation of values
         v = self.value(x)
         out = wei @ v
@@ -46,14 +50,19 @@ class Head(nn.Module):
 class MultiHeadAttention(nn.Module):
     """Multi-headed attention module."""
 
-    def __init__(self, num_heads, head_size):
+    def __init__(self, num_heads, head_size, n_embed=N_EMBED):
         super().__init__()
         self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+        self.proj = nn.Linear(n_embed, n_embed)
+        self.dropout = nn.Dropout(DROPOUT_RATE)
 
     def forward(self, x):
         """Forward pass for multi-headed attention."""
         # concatenate outputs by channel dimension
-        return torch.cat([h(x) for h in self.heads], dim=-1)
+        out = torch.cat([h(x) for h in self.heads], dim=-1)
+        out = self.proj(out)
+        out = self.dropout(out)
+        return out
 
 
 class FeedForward(nn.Module):
@@ -61,26 +70,53 @@ class FeedForward(nn.Module):
 
     def __init__(self, n_embed):
         super().__init__()
-        self.net = nn.Sequential(nn.Linear(n_embed, n_embed), nn.ReLU())
+        self.net = nn.Sequential(
+            nn.Linear(n_embed, 4 * n_embed),
+            nn.ReLU(),
+            nn.Linear(4 * n_embed, n_embed),
+            nn.Dropout(DROPOUT_RATE),
+        )
 
     def forward(self, x):
         """Forward pass in feedforward layer."""
         return self.net(x)
 
 
-class TinyGPT(nn.Module):
-    """Simple model that returns probability of P(c_t|c_t-1)."""
+class Block(nn.Module):
+    """Transformer block."""
 
-    def __init__(self, vocab_size, n_embed=32):
+    def __init__(self, n_embed, num_heads):
+        super().__init__()
+        head_size = n_embed // num_heads
+        self.sa = MultiHeadAttention(num_heads, head_size)
+        self.ffwd = FeedForward(n_embed)
+        # layer normalization (pre-norm formulation)
+        self.ln1 = nn.LayerNorm(n_embed)
+        self.ln2 = nn.LayerNorm(n_embed)
+
+    def forward(self, x):
+        """Forward pass for transformer block."""
+        # communication
+        x = x + self.sa(self.ln1(x))
+        # computation
+        x = x + self.ffwd(self.ln2(x))
+        return x
+
+
+class TinyGPT(nn.Module):
+    """Simple general purpose transformer."""
+
+    def __init__(self, vocab_size, num_heads, n_embed=32):
         super().__init__()
         self.token_embedding_table = nn.Embedding(vocab_size, n_embed)
         self.position_embedding_table = nn.Embedding(BLOCK_SIZE, n_embed)
         # language model head
         self.lm_head = nn.Linear(n_embed, vocab_size)
-        # self-attention head
-        self.sa_heads = MultiHeadAttention(4, n_embed // 4)
-        # feedforward layer
-        self.ffwd = FeedForward(n_embed)
+        # multiple transformer blocks
+        self.blocks = nn.Sequential(
+            *[Block(n_embed, num_heads) for _ in range(num_heads)]
+        )
+        self.ln = nn.LayerNorm(n_embed)
 
     def forward(self, idx, targets=None):
         """Forward pass of network."""
@@ -92,10 +128,8 @@ class TinyGPT(nn.Module):
             torch.arange(time, device=DEVICE)
         )
         x = token_embeddings + position_embeddings
-        # gather information on tokens
-        x = self.sa_heads(x)
-        # let tokens analyse the information
-        x = self.ffwd(x)
+        x = self.blocks(x)
+        x = self.ln(x)
         logits = self.lm_head(x)
 
         if targets is None:
@@ -156,12 +190,12 @@ if __name__ == "__main__":
     val_data = data[split:]
 
     # showcase the inputs and targets of a transformer
-    inputs = train_data[:BLOCK_SIZE]
-    targets = train_data[1 : BLOCK_SIZE + 1]
-    for t in range(BLOCK_SIZE):
-        context = inputs[: t + 1]
-        target = targets[t]
-        print(f"For input {context} the target is {target}")
+    # inputs = train_data[:BLOCK_SIZE]
+    # targets = train_data[1 : BLOCK_SIZE + 1]
+    # for t in range(BLOCK_SIZE):
+    #     context = inputs[: t + 1]
+    #     target = targets[t]
+    #     print(f"For input {context} the target is {target}")
 
     def get_batch(split):
         """Structure data into a batch."""
@@ -172,11 +206,10 @@ if __name__ == "__main__":
         x, y = x.to(DEVICE), y.to(DEVICE)
         return x, y
 
-    model = TinyGPT(vocab_size)
+    model = TinyGPT(vocab_size, num_heads=N_HEADS, n_embed=N_EMBED)
     model.to(DEVICE)
     logits, loss = model(*get_batch("train"))
 
-    print(f"Current loss: {loss}")
     # Print text generated by model
     print(
         decode(
@@ -218,13 +251,12 @@ if __name__ == "__main__":
         # update the gradients
         optimizer.step()
 
-    print(loss.item())
-
     # print model results after training
     print(
         decode(
             model.generate(
-                torch.zeros((1, 1), dtype=torch.long, device=DEVICE), max_new_tokens=100
+                torch.zeros((1, 1), dtype=torch.long, device=DEVICE),
+                max_new_tokens=1000,
             )[0].tolist()
         )
     )
